@@ -2,6 +2,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import IndexModel, ASCENDING, DESCENDING
 import os
 from dotenv import load_dotenv
+import urllib.parse
 
 load_dotenv()
 

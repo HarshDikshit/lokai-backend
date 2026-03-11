@@ -51,7 +51,7 @@ async def _enrich(issue: dict, db) -> dict:
     return issue
 
 
-def _run_ml(description: str, image_path: Optional[str] = None) -> dict:
+def _run_ml(description: str, image_path: str = None) -> dict:
     if not ML_AVAILABLE:
         return {"category": "General", "priority_score": 0.5}
     try:
@@ -112,11 +112,11 @@ async def create_issue(
     loc = _parse_location(location)
 
     # ── Upload files to Cloudinary ───────────────────────────────────────────
-    image_result = await upload_image(image_path, folder="lokai/issues")
-    audio_result = await upload_audio_file(audio_path, folder="lokai/audio")
+    image_result = await upload_image(image_path, folder="lokai/issues") if image else None
+    # audio_result = await upload_audio_file(audio_path, folder="lokai/audio") if audio else None
 
     # ── Run ML pipeline ──────────────────────────────────────────────────────
-    ml = _run_ml(description, image_path)
+    ml = run_pipeline(description, audio_path, image_path)
     resolved_category = category or ml.get("category", "General")
     priority_score    = float(ml.get("priority_score", 0.5))
 
@@ -139,8 +139,8 @@ async def create_issue(
         "status":              "OPEN",
         "image_url":           image_result["url"]       if image_result else None,
         "image_public_id":     image_result["public_id"] if image_result else None,
-        "audio_url":           audio_result["url"]       if audio_result else None,
-        "audio_public_id":     audio_result["public_id"] if audio_result else None,
+        # "audio_url":           audio_result["url"]       if audio_result else None,
+        # "audio_public_id":     audio_result["public_id"] if audio_result else None,
         "resolution_notes":    [],
         "created_at":          datetime.utcnow(),
     }

@@ -19,3 +19,5 @@ pydub
 SpeechRecognition
 ffmpeg-python
 sentencepiece
+cloudinary
+aiofiles

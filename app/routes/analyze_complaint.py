@@ -2,12 +2,12 @@ from fastapi import APIRouter, FastAPI, UploadFile, File, Form
 from models_analyze_complaint.ai_pipeline  import run_pipeline
 import shutil, os
 
-router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
+router = APIRouter(prefix="/analyze_complaint", tags=["Analyze Complaint"])
     
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-@router.post("/analyze_complaint/")
+@router.post("/")
 async def analyze_complaint(
     text: str = Form(None),
     image: UploadFile = File(None),

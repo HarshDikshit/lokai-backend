@@ -67,6 +67,11 @@ async def _enrich(issue: dict, db) -> dict:
         for i, v in enumerate(verifications)
     ]
 
+    # Stringify any remaining ObjectId fields that Pydantic can't serialize
+    for key, val in list(issue.items()):
+        if isinstance(val, ObjectId):
+            issue[key] = str(val)
+
     return issue
 
 
@@ -107,8 +112,8 @@ async def create_issue(
     description:  str           = Form(...),
     location:     str           = Form(...),   # ← always str from multipart; parsed below
     category:     Optional[str] = Form(None),
-    image:        UploadFile = File(None),
-    audio:        UploadFile = File(None),
+    image:        Optional[UploadFile] = File(None),
+    audio:        Optional[UploadFile] = File(None),
     current_user: dict          = Depends(get_current_user),
 ):
     db = get_database()
@@ -323,12 +328,15 @@ async def verify_resolution(
 
     update = {"status": "ESCALATED", "escalated_at": datetime.utcnow()}
     if authority:
-        update["higher_authority_id"] = authority["_id"]
+        # Store as string so Pydantic can serialize it without ObjectId errors
+        update["higher_authority_id"] = str(authority["_id"])
 
     await db.issues.update_one({"_id": ObjectId(issue_id)}, {"$set": update})
 
     if leader_id:
-        await db.users.update_one({"_id": leader_id}, {"$inc": {"failed_cases": 1}})
+        # leader_id may be ObjectId or str depending on context — handle both
+        lid = leader_id if isinstance(leader_id, ObjectId) else ObjectId(str(leader_id))
+        await db.users.update_one({"_id": lid}, {"$inc": {"failed_cases": 1}})
 
     return {"message": "Issue escalated to Higher Authority. Leader has been flagged.", "status": "ESCALATED"}
 

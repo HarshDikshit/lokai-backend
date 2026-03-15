@@ -42,6 +42,7 @@ async def register(data: RegisterRequest):
             "failed_cases":     0,
             "leader_location":  data.leader_location.dict() if data.leader_location else "hjh",
             "department":       data.department or None,
+            "phone":            data.phone or None,
             "created_at":       datetime.utcnow(),
         }
 

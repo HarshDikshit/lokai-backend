@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import os
 
 from app.database.connection import connect_to_mongo, close_mongo_connection
-from app.routes import auth, issues, tasks, verifications, dashboard, analyze_complaint
+from app.routes import auth, issues,  verifications, dashboard, analyze_complaint
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -52,7 +52,6 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 # Routes
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(issues.router, prefix="/api/v1")
-app.include_router(tasks.router, prefix="/api/v1")
 app.include_router(verifications.router, prefix="/api/v1")
 app.include_router(dashboard.router, prefix="/api/v1")
 app.include_router(analyze_complaint.router, prefix="/api/v1")

@@ -70,6 +70,7 @@ class RegisterRequest(BaseModel):
     # Only relevant when role == "leader"
     leader_location: Optional[LocationSchema] = None
     department:      Optional[str]            = None
+    phone: Optional[str] = None
 
     def validate_leader_fields(self) -> None:
         """Call in the route to enforce that leaders provide a location."""
@@ -177,7 +178,7 @@ class TaskResponse(BaseModel):
 
 class VerificationResponse(BaseModel):
     id:               str
-    task_id:          str
+    issue_id:          str
     before_image_url: Optional[str]   = None
     after_image_url:  Optional[str]   = None
     latitude:         Optional[float] = None

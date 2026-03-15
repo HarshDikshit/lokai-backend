@@ -15,14 +15,14 @@ async def upload_verification(
     task_id: str = Form(...),
     latitude: Optional[float] = Form(None),
     longitude: Optional[float] = Form(None),
-    before_image: Optional[UploadFile] = File(default=None),
-    after_image: Optional[UploadFile] = File(default=None),
+    before_image: UploadFile = File(None),
+    after_image: UploadFile = File(None),
     current_user: dict = Depends(require_leader)
 ):
     db = get_database()
     
     try:
-        task = await db.tasks.find_one({"_id": ObjectId(task_id)})
+        task = await db.issues.find_one({"_id": ObjectId(task_id)})
     except Exception:
         raise HTTPException(400, "Invalid task ID")
     if not task:

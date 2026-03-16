@@ -3,7 +3,7 @@ from newsapi import NewsApiClient
 from transformers import pipeline
 import re
 
-router = APIRouter()
+router = APIRouter(prefix="/social-media", tags=["Social Media Analysis"])
 
 # -------------------------
 # CONFIG

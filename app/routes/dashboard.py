@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from app.middleware.auth import get_current_user, require_admin, require_leader
 from app.database.connection import get_database
-from app.services.ml_service import analyze_sentiment
+from models_analyze_complaint.ml_service import analyze_sentiment
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 

@@ -21,3 +21,4 @@ ffmpeg-python
 sentencepiece
 cloudinary
 aiofiles
+newsapi-python

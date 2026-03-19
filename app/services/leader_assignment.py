@@ -91,13 +91,13 @@ async def assign_best_leader(
 
         # ── Composite ────────────────────────────────────────────────────────
         composite = (
-            cat_rate                * 40
-            + overall_rate          * 30
-            + (1.0 if is_new else 0.0) * 20   # new leaders get fair exposure
-            + loc_score             * 10
-            - open_issues           * 5
-            - failed_cases          * 3
-            + random.uniform(0, 2)             # small jitter for rotation
+            loc_score                * 50
+            + cat_rate               * 20
+            + overall_rate           * 15   # new leaders get fair exposure
+            + (1.0 if is_new else 0.0)  * 10
+            - open_issues            * 5
+            - failed_cases           * 3
+            + random.uniform(0, 2)            # small jitter for rotation
         )
 
         if composite > best_score:

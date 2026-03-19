@@ -32,7 +32,7 @@ def _location_score(leader: dict, location: dict) -> int:
     """0–3: how many of state/city/town match between leader and issue."""
     l_loc = leader.get("leader_location") or {}
     score = 0
-    for field in ("state", "city", "town"):
+    for field in ("city", "town"):
         iv = _norm(location.get(field))
         lv = _norm(l_loc.get(field))
         if iv and lv and iv == lv:

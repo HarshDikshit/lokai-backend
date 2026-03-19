@@ -103,6 +103,88 @@ async def admin_dashboard(current_user: dict = Depends(require_admin)):
     }
 
 
+
+@router.get("/authority")
+async def authority_dashboard(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ("higher_authority", "admin"):
+        raise HTTPException(403, "Access denied")
+
+    db = get_database()
+
+    # ── Platform-wide counts ─────────────────────────────────────────────────
+    total_issues    = await db.issues.count_documents({})
+    open_issues     = await db.issues.count_documents({"status": "OPEN"})
+    closed_issues   = await db.issues.count_documents({"status": "CLOSED"})
+    escalated_count = await db.issues.count_documents({"status": "ESCALATED"})
+    awaiting_count  = await db.issues.count_documents(
+        {"status": {"$in": ["RESOLVED_L1", "RESOLVED_L2"]}}
+    )
+
+    # ── Leader performance table ──────────────────────────────────────────────
+    leaders = await db.users.find({"role": "leader"}).to_list(length=200)
+    leader_stats = []
+    for ldr in leaders:
+        lid          = ldr["_id"]
+        total        = await db.issues.count_documents({"leader_id": lid})
+        closed       = await db.issues.count_documents({"leader_id": lid, "status": "CLOSED"})
+        open_c       = await db.issues.count_documents({"leader_id": lid, "status": "OPEN"})
+        escalated    = await db.issues.count_documents({"leader_id": lid, "status": "ESCALATED"})
+        awaiting     = await db.issues.count_documents(
+            {"leader_id": lid, "status": {"$in": ["RESOLVED_L1", "RESOLVED_L2"]}}
+        )
+        failed       = ldr.get("failed_cases", 0)
+        rate         = round(closed / total * 100, 1) if total > 0 else 0.0
+        leader_stats.append({
+            "leader_id":       str(lid),
+            "name":            ldr["name"],
+            "email":           ldr.get("email", ""),
+            "phone":           ldr.get("phone"),
+            "leader_location": ldr.get("leader_location"),
+            "total_issues":    total,
+            "closed_issues":   closed,
+            "open_issues":     open_c,
+            "escalated":       escalated,
+            "awaiting_review": awaiting,
+            "failed_cases":    failed,
+            "resolution_rate": rate,
+        })
+
+    # Sort: highest failed first, then lowest resolution rate
+    leader_stats.sort(key=lambda x: (-x["failed_cases"], x["resolution_rate"]))
+
+    # ── Escalated issues with leader info ─────────────────────────────────────
+    esc_issues = await db.issues.find({"status": "ESCALATED"}).sort("escalated_at", -1).to_list(50)
+    escalated_list = []
+    for iss in esc_issues:
+        leader = await db.users.find_one({"_id": iss.get("leader_id")}) if iss.get("leader_id") else None
+        citizen = await db.users.find_one({"_id": iss.get("user_id")}) if iss.get("user_id") else None
+        escalated_list.append({
+            "issue_id":       str(iss["_id"]),
+            "title":          iss.get("title", ""),
+            "description":    iss.get("description", ""),
+            "category":       iss.get("category"),
+            "priority_score": iss.get("priority_score"),
+            "leader_id":      str(iss["leader_id"]) if iss.get("leader_id") else None,
+            "leader_name":    leader["name"] if leader else None,
+            "citizen_name":   citizen["name"] if citizen else None,
+            "escalated_at":   iss["escalated_at"].isoformat() if iss.get("escalated_at") else None,
+            "created_at":     iss["created_at"].isoformat() if iss.get("created_at") else None,
+            "resolution_attempts": iss.get("resolution_attempts", 0),
+        })
+
+    return {
+        "overview": {
+            "total_issues":    total_issues,
+            "open_issues":     open_issues,
+            "closed_issues":   closed_issues,
+            "escalated":       escalated_count,
+            "awaiting_review": awaiting_count,
+        },
+        "leader_stats":   leader_stats,
+        "escalated_list": escalated_list,
+    }
+
+
 @router.get("/citizen")
 async def citizen_dashboard(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "citizen":

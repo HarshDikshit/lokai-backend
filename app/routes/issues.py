@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from typing import List, Optional
 from datetime import datetime
 from bson import ObjectId
-import json, shutil
+import json
 
 from app.schemas.Schemas import (
     IssueResolveRequest,
@@ -16,7 +16,7 @@ from app.schemas.Schemas import (
 from app.middleware.auth import get_current_user, require_leader
 from app.database.connection import get_database
 from utils.cloudinary_utils import (
-    upload_image,
+    upload_image_file,
     upload_audio_file,
     delete_issue_files,
 )
@@ -31,7 +31,6 @@ except ImportError:
 
 
 router = APIRouter(prefix="/issues", tags=["Issues"])
-UPLOAD_DIR = "uploads"
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -41,17 +40,42 @@ def _str_id(v) -> Optional[str]:
 
 
 async def _enrich(issue: dict, db) -> dict:
-    citizen = await db.users.find_one({"_id": issue.get("user_id")})
-    leader  = await db.users.find_one({"_id": issue.get("leader_id")}) if issue.get("leader_id") else None
+    citizen   = await db.users.find_one({"_id": issue.get("user_id")})
+    leader    = await db.users.find_one({"_id": issue.get("leader_id")}) if issue.get("leader_id") else None
+    issue_oid = issue.get("_id")
+
     issue["id"]           = str(issue.pop("_id"))
     issue["user_id"]      = _str_id(issue.get("user_id"))
     issue["leader_id"]    = _str_id(issue.get("leader_id"))
     issue["citizen_name"] = citizen["name"] if citizen else None
     issue["leader_name"]  = leader["name"]  if leader  else None
+
+    # Attach verification records (before/after images) keyed per attempt
+    verifications = await db.verifications.find(
+        {"task_id": issue_oid}
+    ).sort("timestamp", 1).to_list(length=10)
+
+    issue["verifications"] = [
+        {
+            "attempt":          i + 1,
+            "before_image_url": v.get("before_image_url"),
+            "after_image_url":  v.get("after_image_url"),
+            "latitude":         v.get("latitude"),
+            "longitude":        v.get("longitude"),
+            "timestamp":        v["timestamp"].isoformat() if v.get("timestamp") else None,
+        }
+        for i, v in enumerate(verifications)
+    ]
+
+    # Stringify any remaining ObjectId fields that Pydantic can't serialize
+    for key, val in list(issue.items()):
+        if isinstance(val, ObjectId):
+            issue[key] = str(val)
+
     return issue
 
 
-def _run_ml(description: str, image_path: str = None) -> dict:
+def _run_ml(description: str, image_path: Optional[str] = None) -> dict:
     if not ML_AVAILABLE:
         return {"category": "General", "priority_score": 0.5}
     try:
@@ -85,38 +109,24 @@ def _parse_location(location_str: str) -> LocationSchema:
 
 @router.post("", status_code=201)
 async def create_issue(
-    description:  Optional[str]           = Form(None),
+    description:  str           = Form(...),
     location:     str           = Form(...),   # ← always str from multipart; parsed below
     category:     Optional[str] = Form(None),
-    image:        UploadFile = File(None),
-    audio:        UploadFile = File(None),
+    image:        Optional[UploadFile] = File(None),
+    audio:        Optional[UploadFile] = File(None),
     current_user: dict          = Depends(get_current_user),
 ):
     db = get_database()
-
-    image_path = None
-    audio_path = None
-
-    if image:
-        image_path = f"{UPLOAD_DIR}/{image.filename}"
-        with open(image_path,"wb") as buffer:
-            shutil.copyfileobj(image.file,buffer)
-
-    if audio:
-        audio_path = f"{UPLOAD_DIR}/{audio.filename}"
-        with open(audio_path,"wb") as buffer:
-            shutil.copyfileobj(audio.file,buffer)
-        print("Audio saved at:", audio_path)
 
     # ── Parse location string → LocationSchema ───────────────────────────────
     loc = _parse_location(location)
 
     # ── Upload files to Cloudinary ───────────────────────────────────────────
-    image_result = await upload_image(image_path, folder="lokai/issues") if image else None
-    # audio_result = await upload_audio_file(audio_path, folder="lokai/audio") if audio else None
+    image_result = await upload_image_file(image, folder="lokai/issues")
+    audio_result = await upload_audio_file(audio, folder="lokai/audio")
 
     # ── Run ML pipeline ──────────────────────────────────────────────────────
-    ml = run_pipeline(description, audio_path, image_path)
+    ml = _run_ml(description)
     resolved_category = category or ml.get("category", "General")
     priority_score    = float(ml.get("priority_score", 0.5))
 
@@ -139,8 +149,8 @@ async def create_issue(
         "status":              "OPEN",
         "image_url":           image_result["url"]       if image_result else None,
         "image_public_id":     image_result["public_id"] if image_result else None,
-        # "audio_url":           audio_result["url"]       if audio_result else None,
-        # "audio_public_id":     audio_result["public_id"] if audio_result else None,
+        "audio_url":           audio_result["url"]       if audio_result else None,
+        "audio_public_id":     audio_result["public_id"] if audio_result else None,
         "resolution_notes":    [],
         "created_at":          datetime.utcnow(),
     }
@@ -318,12 +328,15 @@ async def verify_resolution(
 
     update = {"status": "ESCALATED", "escalated_at": datetime.utcnow()}
     if authority:
-        update["higher_authority_id"] = authority["_id"]
+        # Store as string so Pydantic can serialize it without ObjectId errors
+        update["higher_authority_id"] = str(authority["_id"])
 
     await db.issues.update_one({"_id": ObjectId(issue_id)}, {"$set": update})
 
     if leader_id:
-        await db.users.update_one({"_id": leader_id}, {"$inc": {"failed_cases": 1}})
+        # leader_id may be ObjectId or str depending on context — handle both
+        lid = leader_id if isinstance(leader_id, ObjectId) else ObjectId(str(leader_id))
+        await db.users.update_one({"_id": lid}, {"$inc": {"failed_cases": 1}})
 
     return {"message": "Issue escalated to Higher Authority. Leader has been flagged.", "status": "ESCALATED"}
 

@@ -6,6 +6,10 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from contextlib import asynccontextmanager
+from bson import ObjectId
+from datetime import datetime
+from starlette.responses import Response
+import json
 import os
 
 from app.database.connection import connect_to_mongo, close_mongo_connection
@@ -26,12 +30,53 @@ os.makedirs("uploads/images", exist_ok=True)
 os.makedirs("uploads/audio", exist_ok=True)
 os.makedirs("uploads/verifications", exist_ok=True)
 
+
+# ── Global ObjectId / datetime sanitiser ──────────────────────────────────────
+# Walks every JSON response and converts ObjectId → str, datetime → ISO string.
+# This is an app-level safety net so no route can ever leak a raw ObjectId to
+# Pydantic's serializer regardless of what the route function returns.
+
+def _sanitise(obj):
+    if isinstance(obj, dict):
+        return {k: _sanitise(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitise(v) for v in obj]
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
+
+
 app = FastAPI(
     title="LokAI – Local Leadership Decision Intelligence Platform",
     description="Civic governance platform for reporting and resolving local issues",
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+@app.middleware("http")
+async def sanitise_objectids(request: Request, call_next):
+    response = await call_next(request)
+    ct = response.headers.get("content-type", "")
+    if "application/json" not in ct:
+        return response
+    body = b""
+    async for chunk in response.body_iterator:
+        body += chunk
+    try:
+        data  = json.loads(body)
+        clean = _sanitise(data)
+        # Rebuild headers without content-length (length may change after sanitise)
+        headers = {k: v for k, v in response.headers.items()
+                   if k.lower() != "content-length"}
+        return JSONResponse(content=clean, status_code=response.status_code,
+                            headers=headers)
+    except Exception:
+        return Response(content=body, status_code=response.status_code,
+                        media_type=response.media_type)
+
 
 # Rate limiting
 app.state.limiter = limiter

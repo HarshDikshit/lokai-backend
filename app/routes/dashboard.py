@@ -19,9 +19,11 @@ async def leader_dashboard(current_user: dict = Depends(require_leader)):
     
     # Task metrics
     all_tasks = await db.tasks.find({"created_by": leader_id}).to_list(length=1000)
-    completed_tasks = sum(1 for t in all_tasks if t["status"] == "completed")
-    pending_tasks = sum(1 for t in all_tasks if t["status"] in ("pending", "in_progress"))
+    # completed_tasks = sum(1 for t in all_tasks if t["status"] == "completed")
+    # pending_tasks = sum(1 for t in all_tasks if t["status"] in ("pending", "in_progress"))
     
+    completed_tasks = await db.issues.count_documents({"leader_id": leader_id, "status": "CLOSED"})
+    pending_tasks = await db.issues.count_documents({"leader_id": leader_id, "status": ["RESOLVED_L1", "RESOLVED_L2"]})
     escalated = await db.issues.count_documents({"leader_id": leader_id, "status": "ESCALATED"})
     failed_cases = current_user.get("failed_cases", 0)
     active = await db.issues.count_documents({"leader_id": leader_id, "status": "OPEN"})

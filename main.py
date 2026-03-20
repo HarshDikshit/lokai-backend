@@ -11,6 +11,7 @@ from datetime import datetime
 from starlette.responses import Response
 import json
 import os
+from app.routes import feed
 
 from app.database.connection import connect_to_mongo, close_mongo_connection
 from app.routes import auth, issues, verifications, dashboard, analyze_complaint, social_media_analysis, public_update
@@ -101,6 +102,7 @@ app.include_router(verifications.router, prefix="/api/v1")
 app.include_router(dashboard.router, prefix="/api/v1")
 app.include_router(analyze_complaint.router, prefix="/api/v1")
 app.include_router(social_media_analysis.router, prefix="/api/v1")
+app.include_router(feed.router, prefix="/api/v1")
 # app.include_router(public_update.router, prefix="/api/v1")
 
 

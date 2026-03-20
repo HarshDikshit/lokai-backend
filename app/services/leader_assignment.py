@@ -32,7 +32,7 @@ def _location_score(leader: dict, location: dict) -> int:
     """0–3: how many of state/city/town match between leader and issue."""
     l_loc = leader.get("leader_location") or {}
     score = 0
-    for field in ("state", "city", "town"):
+    for field in ("city", "town"):
         iv = _norm(location.get(field))
         lv = _norm(l_loc.get(field))
         if iv and lv and iv == lv:
@@ -91,13 +91,13 @@ async def assign_best_leader(
 
         # ── Composite ────────────────────────────────────────────────────────
         composite = (
-            cat_rate                * 40
-            + overall_rate          * 30
-            + (1.0 if is_new else 0.0) * 20   # new leaders get fair exposure
-            + loc_score             * 10
-            - open_issues           * 5
-            - failed_cases          * 3
-            + random.uniform(0, 2)             # small jitter for rotation
+            loc_score                * 50
+            + cat_rate               * 20
+            + overall_rate           * 15   # new leaders get fair exposure
+            + (1.0 if is_new else 0.0)  * 10
+            - open_issues            * 5
+            - failed_cases           * 3
+            + random.uniform(0, 2)            # small jitter for rotation
         )
 
         if composite > best_score:

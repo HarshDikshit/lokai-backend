@@ -1,0 +1,31 @@
+# from fastapi import APIRouter
+# from public_updates_api.schemas import UpdateRequest
+
+# from public_updates_api.update_generator import (
+#     determine_priority_label,
+#     generate_ai_reasoning,
+#     generate_llm_public_update
+# )
+
+# router = APIRouter()
+
+
+# @router.post("/generate-acknowledgement-update")
+
+# def acknowledgement_update(data: UpdateRequest):
+
+#     priority_label = determine_priority_label(data.priority_score)
+
+#     reasoning = generate_ai_reasoning(
+#         data.category,
+#         data.sentiment,
+#         data.priority_score
+#     )
+
+#     update = generate_llm_public_update(
+#         data.category,
+#         data.issue,
+#         data.location,
+#         priority_label,
+#         "acknowledged"
+#     )

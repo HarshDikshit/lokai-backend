@@ -1,10 +1,11 @@
 """
 app/schemas/Schemas.py
 All Pydantic models for request validation and response serialization.
+Updated with clustering, duplicate-detection, and review queue models.
 """
 
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
 
@@ -26,6 +27,25 @@ class IssueStatus(str, Enum):
     CLOSED      = "CLOSED"
 
 
+class ClusterStatus(str, Enum):
+    ACTIVE         = "ACTIVE"
+    RESOLVED       = "RESOLVED"
+    CLOSED         = "CLOSED"
+    ESCALATED      = "ESCALATED"
+    PENDING_REVIEW = "PENDING_REVIEW"
+
+
+class MatchStatus(str, Enum):
+    AUTO_MERGED     = "auto_merged"
+    PENDING_REVIEW  = "pending_review"
+    NEW_CLUSTER     = "new_cluster"
+
+
+class ReviewDecision(str, Enum):
+    MERGE  = "merge"
+    REJECT = "reject"
+
+
 class TaskStatus(str, Enum):
     PENDING     = "pending"
     IN_PROGRESS = "in_progress"
@@ -45,8 +65,8 @@ class UrgencyLevel(str, Enum):
 class LocationSchema(BaseModel):
     """
     Used for both issue location and leader_location.
-    latitude / longitude  — map display / geo queries.
-    state / city / town   — leader assignment matching (any one match is enough).
+    longitude / latitude  — required for GeoJSON 2dsphere indexing.
+    state / city / town   — leader assignment matching.
     """
     latitude:  Optional[float] = None
     longitude: Optional[float] = None
@@ -57,6 +77,19 @@ class LocationSchema(BaseModel):
 
     class Config:
         extra = "ignore"   # silently drop unknown fields from old clients
+
+
+class GeoPointSchema(BaseModel):
+    """
+    GeoJSON Point as stored in MongoDB after _parse_location().
+    Returned in API responses where location is serialized from the DB.
+    """
+    type:        str        = "Point"
+    coordinates: List[float]          # [longitude, latitude]
+    state:       Optional[str] = None
+    city:        Optional[str] = None
+    town:        Optional[str] = None
+    address:     Optional[str] = None
 
 
 # ─── Auth Schemas ─────────────────────────────────────────────────────────────
@@ -70,10 +103,9 @@ class RegisterRequest(BaseModel):
     # Only relevant when role == "leader"
     leader_location: Optional[LocationSchema] = None
     department:      Optional[str]            = None
-    phone: Optional[str] = None
+    phone:           Optional[str]            = None
 
     def validate_leader_fields(self) -> None:
-        """Call in the route to enforce that leaders provide a location."""
         if self.role == UserRole.LEADER and not self.leader_location:
             raise ValueError("leader_location is required for leader registration")
 
@@ -105,8 +137,8 @@ class UserResponse(BaseModel):
 # ─── Issue Schemas ────────────────────────────────────────────────────────────
 
 class IssueCreate(BaseModel):
-    description: str           = Field(...)
-    category:    Optional[str] = None
+    description: str                    = Field(...)
+    category:    Optional[str]          = None
     location:    Optional[LocationSchema] = None
 
 
@@ -117,24 +149,51 @@ class ResolutionNote(BaseModel):
     resolved_at: str
 
 
+class VerificationRecord(BaseModel):
+    attempt:          int
+    before_image_url: Optional[str]   = None
+    after_image_url:  Optional[str]   = None
+    latitude:         Optional[float] = None
+    longitude:        Optional[float] = None
+    timestamp:        Optional[str]   = None
+
+
 class IssueResponse(BaseModel):
     id:                  str
-    title:               str
     description:         str
-    category:            Optional[str]       = None
-    priority_score:      Optional[float]     = None
-    urgency_level:       Optional[str]       = None   # derived from priority_score if needed
-    location:            Optional[dict]      = None
+    category:            Optional[str]            = None
+    priority_score:      Optional[float]          = None
+    urgency_level:       Optional[str]            = None
+    location:            Optional[dict]           = None
     user_id:             str
-    leader_id:           Optional[str]       = None
-    resolution_attempts: int                 = 0
+    leader_id:           Optional[str]            = None
+    resolution_attempts: int                      = 0
     status:              str
-    image_url:           Optional[str]       = None   # single Cloudinary URL
-    audio_url:           Optional[str]       = None
-    resolution_notes:    List[ResolutionNote] = []
+    source_type:         Optional[str]            = "citizen"
+    image_url:           Optional[str]            = None
+    audio_url:           Optional[str]            = None
+    resolution_notes:    List[ResolutionNote]     = []
+    verifications:       List[VerificationRecord] = []
     created_at:          datetime
-    citizen_name:        Optional[str]       = None
-    leader_name:         Optional[str]       = None
+    citizen_name:        Optional[str]            = None
+    leader_name:         Optional[str]            = None
+    # Clustering fields
+    issue_cluster_id:    Optional[str]            = None
+    match_status:        Optional[str]            = None
+    duplicate_score:     Optional[float]          = None
+
+
+class IssueCreateResponse(BaseModel):
+    """Response returned after POST /issues"""
+    message:         str
+    issue_id:        str
+    leader_id:       Optional[str]   = None
+    category:        str
+    priority_score:  float
+    # Clustering metadata
+    cluster_id:      Optional[str]   = None
+    match_status:    Optional[str]   = None   # "auto_merged" | "pending_review" | "new_cluster"
+    duplicate_score: Optional[float] = None
 
 
 class IssueResolveRequest(BaseModel):
@@ -144,6 +203,95 @@ class IssueResolveRequest(BaseModel):
 class CitizenVerificationRequest(BaseModel):
     approved: bool
     feedback: Optional[str] = None
+
+
+# ─── Cluster Schemas ──────────────────────────────────────────────────────────
+
+class SimilarClusterItem(BaseModel):
+    """One item in the GET /issues/similar response."""
+    cluster_id:       str
+    normalized_title: str
+    category:         str
+    complaint_count:  int
+    priority_score:   float
+    similarity_score: float
+    last_reported_at: Optional[str] = None
+
+
+class SimilarIssuesResponse(BaseModel):
+    """Response from GET /issues/similar pre-check."""
+    similar_clusters: List[SimilarClusterItem]
+    count:            int
+
+
+class ClusterResponse(BaseModel):
+    """Full cluster document returned from GET /clusters/{id}."""
+    id:                    str
+    normalized_title:      Optional[str]   = None
+    normalized_summary:    Optional[str]   = None
+    category:              str
+    location:              Optional[dict]  = None
+    complaint_count:       int             = 0
+    unique_reporter_count: int             = 0
+    evidence_count:        int             = 0
+    severity_score:        float           = 0.5
+    urgency_score:         float           = 0.5
+    priority_score:        float           = 0.5
+    category_criticality:  float           = 0.3
+    assigned_leader_id:    Optional[str]   = None
+    status:                str
+    spike_count:           int             = 0
+    created_at:            Optional[str]   = None
+    last_reported_at:      Optional[str]   = None
+
+
+class SupportIssueResponse(BaseModel):
+    """Response from POST /issues/{id}/support"""
+    message:    str
+    cluster_id: str
+    new_count:  int
+
+
+# ─── Review Queue Schemas ─────────────────────────────────────────────────────
+
+class ScoreBreakdown(BaseModel):
+    total:    float
+    text_sim: float
+    geo_sim:  float
+    time_sim: float
+    img_sim:  Optional[float] = None
+    cat_sim:  float
+
+
+class ReviewQueueItem(BaseModel):
+    """One item in the higher-authority review queue."""
+    review_id:               str
+    issue_id:                str
+    cluster_id:              str
+    score:                   float
+    score_breakdown:         Optional[ScoreBreakdown] = None
+    reason:                  Optional[str]            = None
+    status:                  str
+    created_at:              Optional[str]            = None
+    # Enriched summaries
+    issue_description:       Optional[str]            = None
+    issue_category:          Optional[str]            = None
+    cluster_title:           Optional[str]            = None
+    cluster_complaint_count: Optional[int]            = None
+
+
+class ReviewQueueResponse(BaseModel):
+    items: List[ReviewQueueItem]
+    count: int
+
+
+class ReviewDecisionRequest(BaseModel):
+    decision: ReviewDecision   # "merge" | "reject"
+
+
+class ReviewDecisionResponse(BaseModel):
+    outcome:    str   # "merged" | "new_cluster_created"
+    cluster_id: str
 
 
 # ─── Task Schemas ─────────────────────────────────────────────────────────────
@@ -178,7 +326,7 @@ class TaskResponse(BaseModel):
 
 class VerificationResponse(BaseModel):
     id:               str
-    issue_id:          str
+    issue_id:         str
     before_image_url: Optional[str]   = None
     after_image_url:  Optional[str]   = None
     latitude:         Optional[float] = None

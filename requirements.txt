@@ -23,3 +23,7 @@ cloudinary
 aiofiles
 newsapi-python
 pyngrok
+librosa
+soundfile
+sentence-transformers
+numpy

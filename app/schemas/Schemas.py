@@ -27,13 +27,6 @@ class IssueStatus(str, Enum):
     CLOSED      = "CLOSED"
 
 
-class ClusterStatus(str, Enum):
-    ACTIVE         = "ACTIVE"
-    RESOLVED       = "RESOLVED"
-    CLOSED         = "CLOSED"
-    ESCALATED      = "ESCALATED"
-    PENDING_REVIEW = "PENDING_REVIEW"
-
 
 class MatchStatus(str, Enum):
     AUTO_MERGED     = "auto_merged"
@@ -204,52 +197,6 @@ class CitizenVerificationRequest(BaseModel):
     approved: bool
     feedback: Optional[str] = None
 
-
-# ─── Cluster Schemas ──────────────────────────────────────────────────────────
-
-class SimilarClusterItem(BaseModel):
-    """One item in the GET /issues/similar response."""
-    cluster_id:       str
-    normalized_title: str
-    category:         str
-    complaint_count:  int
-    priority_score:   float
-    similarity_score: float
-    last_reported_at: Optional[str] = None
-
-
-class SimilarIssuesResponse(BaseModel):
-    """Response from GET /issues/similar pre-check."""
-    similar_clusters: List[SimilarClusterItem]
-    count:            int
-
-
-class ClusterResponse(BaseModel):
-    """Full cluster document returned from GET /clusters/{id}."""
-    id:                    str
-    normalized_title:      Optional[str]   = None
-    normalized_summary:    Optional[str]   = None
-    category:              str
-    location:              Optional[dict]  = None
-    complaint_count:       int             = 0
-    unique_reporter_count: int             = 0
-    evidence_count:        int             = 0
-    severity_score:        float           = 0.5
-    urgency_score:         float           = 0.5
-    priority_score:        float           = 0.5
-    category_criticality:  float           = 0.3
-    assigned_leader_id:    Optional[str]   = None
-    status:                str
-    spike_count:           int             = 0
-    created_at:            Optional[str]   = None
-    last_reported_at:      Optional[str]   = None
-
-
-class SupportIssueResponse(BaseModel):
-    """Response from POST /issues/{id}/support"""
-    message:    str
-    cluster_id: str
-    new_count:  int
 
 
 # ─── Review Queue Schemas ─────────────────────────────────────────────────────

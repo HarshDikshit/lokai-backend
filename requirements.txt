@@ -27,3 +27,5 @@ librosa
 soundfile
 sentence-transformers
 numpy
+requests
+langdetect

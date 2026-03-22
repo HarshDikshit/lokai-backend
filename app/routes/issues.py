@@ -1,9 +1,15 @@
 """
 app/routes/issues.py
-Full integration of duplicate-reduction clustering pipeline.
+
+Duplicate detection is now done with simple text/location matching.
+No transformer models needed.
+
+New endpoints:
+  GET /issues/check-duplicate   — citizen submit screen pre-check
+  GET /issues/{id}/similar      — leader "Show Similar Issues" button
 """
 
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query
 from typing import List, Optional
 from datetime import datetime
 from bson import ObjectId
@@ -31,16 +37,15 @@ except ImportError:
     print("[WARN] ML pipeline not found — category/priority will use defaults")
 
 try:
-    from model_duplicate_issue_detection.clustering_service import (
-        process_new_complaint,
-        check_similar_issues,
-        support_existing_cluster,
+    from model_duplicate_issue_detection.simple_duplicate_check import (
+        check_exact_duplicate,
+        find_similar_issues_for_leader,
     )
-    from model_duplicate_issue_detection.review_service import get_review_queue, resolve_review
-    CLUSTERING_AVAILABLE = True
-except ImportError:
-    CLUSTERING_AVAILABLE = False
-    print("[WARN] Clustering pipeline not found — issues stored without deduplication")
+    DEDUP_AVAILABLE = True
+    print("[INFO] Simple duplicate check loaded ✓")
+except ImportError as e:
+    DEDUP_AVAILABLE = False
+    print(f"[WARN] Duplicate check not available: {e}")
 
 
 router = APIRouter(prefix="/issues", tags=["Issues"])
@@ -57,13 +62,15 @@ async def _enrich(issue: dict, db) -> dict:
     leader    = await db.users.find_one({"_id": issue.get("leader_id")}) if issue.get("leader_id") else None
     issue_oid = issue.get("_id")
 
-    issue["id"]           = str(issue.pop("_id"))
-    issue["user_id"]      = _str_id(issue.get("user_id"))
-    issue["leader_id"]    = _str_id(issue.get("leader_id"))
-    issue["citizen_name"] = citizen["name"] if citizen else None
-    issue["leader_name"]  = leader["name"]  if leader  else None
+    issue["id"]            = str(issue.pop("_id"))
+    issue["user_id"]       = _str_id(issue.get("user_id"))
+    issue["leader_id"]     = _str_id(issue.get("leader_id"))
+    issue["citizen_name"]  = citizen["name"]         if citizen else "Anonymous"
+    issue["citizen_phone"] = citizen.get("phone")    if citizen else None
+    issue["leader_name"]   = leader["name"]          if leader  else None
+    issue["leader_phone"]  = leader.get("phone")     if leader  else None
 
-    # Attach verification records (before/after images) keyed per attempt
+    issue_oid = ObjectId(issue["id"])
     verifications = await db.verifications.find(
         {"task_id": issue_oid}
     ).sort("timestamp", 1).to_list(length=10)
@@ -80,11 +87,6 @@ async def _enrich(issue: dict, db) -> dict:
         for i, v in enumerate(verifications)
     ]
 
-    # Attach cluster info if present
-    if issue.get("issue_cluster_id"):
-        issue["issue_cluster_id"] = str(issue["issue_cluster_id"])
-
-    # Stringify any remaining ObjectId fields that Pydantic can't serialize
     for key, val in list(issue.items()):
         if isinstance(val, ObjectId):
             issue[key] = str(val)
@@ -96,55 +98,39 @@ async def _enrich(issue: dict, db) -> dict:
     return issue
 
 
-def _run_ml(description: str, image_path: Optional[str] = None) -> dict:
+def _run_ml(description: str) -> dict:
     if not ML_AVAILABLE:
         return {
-            "category":       "General",
-            "priority_score": 0.5,
-            "urgency_score":  0.5,
+            "category":        "General",
+            "priority_score":  0.5,
+            "urgency_score":   0.5,
             "sentiment_score": 0.0,
         }
     try:
-        result = run_pipeline(description, image_path) or {}
-        # Ensure all expected keys exist with safe defaults
+        result = run_pipeline(description) or {}
         result.setdefault("urgency_score",   0.5)
         result.setdefault("sentiment_score", 0.0)
         return result
     except Exception as e:
         print(f"[ML] pipeline error: {e}")
         return {
-            "category":       "General",
-            "priority_score": 0.5,
-            "urgency_score":  0.5,
+            "category":        "General",
+            "priority_score":  0.5,
+            "urgency_score":   0.5,
             "sentiment_score": 0.0,
         }
 
 
 def _parse_location(location_str: str) -> dict:
-    """
-    Parse location from JSON string sent via multipart form.
-    Now returns a plain dict with GeoJSON `coordinates` for 2dsphere indexing.
-
-    Expected input:
-        {
-            "state":     "UP",
-            "city":      "Kanpur",
-            "town":      "Civil Lines",
-            "longitude": 80.3319,
-            "latitude":  26.4499
-        }
-    """
     try:
         raw = json.loads(location_str)
         if not isinstance(raw, dict):
             raise ValueError("location must be a JSON object")
-
         lon = float(raw.get("longitude", 0.0))
         lat = float(raw.get("latitude",  0.0))
-
         return {
             "type":        "Point",
-            "coordinates": [lon, lat],       # GeoJSON order: [longitude, latitude]
+            "coordinates": [lon, lat],
             "state":       raw.get("state",   ""),
             "city":        raw.get("city",    ""),
             "town":        raw.get("town",    ""),
@@ -154,7 +140,7 @@ def _parse_location(location_str: str) -> dict:
         raise HTTPException(
             400,
             detail=(
-                "location must be a valid JSON string. "
+                'location must be valid JSON. '
                 'Example: {"state":"UP","city":"Kanpur","town":"Civil Lines",'
                 '"longitude":80.33,"latitude":26.45}'
             ),
@@ -163,131 +149,81 @@ def _parse_location(location_str: str) -> dict:
         raise HTTPException(400, detail=f"Invalid location data: {e}")
 
 
-# ─── POST /issues ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATIC ROUTES FIRST — before /{issue_id}
+# ═══════════════════════════════════════════════════════════════════════════════
 
-@router.post("", status_code=201)
-async def create_issue(
-    description:  str                  = Form(...),
-    location:     str                  = Form(...),
-    category:     Optional[str]        = Form(None),
-    image:        Optional[UploadFile] = File(None),
-    audio:        Optional[UploadFile] = File(None),
-    current_user: dict                 = Depends(get_current_user),
+# ─── GET /issues/check-duplicate ─────────────────────────────────────────────
+# Called by Flutter submit screen before allowing submission.
+
+@router.get("/check-duplicate")
+async def check_duplicate(
+    description:  str,
+    city:         str   = "",
+    town:         str   = "",
+    current_user: dict  = Depends(get_current_user),
 ):
     """
-    Create a new citizen complaint.
+    Check if this citizen already has an open issue with very similar text
+    from the same location.
 
-    Pipeline:
-    1. Parse & validate GeoJSON location
-    2. Upload media to Cloudinary
-    3. Run ML (category, urgency, sentiment)
-    4. Assign best leader
-    5. Insert raw complaint into `issues`
-    6. Run duplicate-detection → attach to cluster OR create new cluster
-    7. Return issue_id + cluster_id + match_status
+    Returns:
+      { "is_duplicate": false }
+      { "is_duplicate": true, "existing_issue": { id, description, status, created_at } }
     """
-    db = get_database()
+    if not DEDUP_AVAILABLE:
+        return {"is_duplicate": False}
 
-    # ── 1. Parse location ────────────────────────────────────────────────────
-    loc = _parse_location(location)
+    db       = get_database()
+    location = {"city": city, "town": town}
 
-    # ── 2. Upload media ──────────────────────────────────────────────────────
-    image_result = await upload_image_file(image, folder="lokai/issues")
-    audio_result = await upload_audio_file(audio, folder="lokai/audio")
-
-    # ── 3. ML ────────────────────────────────────────────────────────────────
-    ml                = _run_ml(description)
-    resolved_category = category or ml.get("category", "General")
-    priority_score    = float(ml.get("priority_score", 0.5))
-
-    # ── 4. Leader assignment ─────────────────────────────────────────────────
-    leader_id = await assign_best_leader(
+    existing = await check_exact_duplicate(
         db,
-        location={"city": loc.get("city"), "town": loc.get("town")},
-        category=resolved_category,
+        user_id=current_user["_id"],
+        description=description,
+        location=location,
     )
 
-    # ── 5. Build and insert raw complaint ────────────────────────────────────
-    now = datetime.utcnow()
-    issue_doc = {
-        "description":         description,
-        "category":            resolved_category,
-        "priority_score":      priority_score,
-        "location":            loc,               # GeoJSON Point
-        "user_id":             current_user["_id"],
-        "leader_id":           leader_id,
-        "resolution_attempts": 0,
-        "status":              "OPEN",
-        "source_type":         "citizen",
-        "image_url":           image_result["url"]       if image_result else None,
-        "image_public_id":     image_result["public_id"] if image_result else None,
-        "audio_url":           audio_result["url"]       if audio_result else None,
-        "audio_public_id":     audio_result["public_id"] if audio_result else None,
-        # Clustering fields (populated by pipeline below)
-        "issue_cluster_id":    None,
-        "match_status":        None,
-        "duplicate_score":     None,
-        "text_embedding":      None,
-        "image_embedding":     None,
-        "resolution_notes":    [],
-        "created_at":          now,
-        "updated_at":          now,
-    }
+    if existing is None:
+        return {"is_duplicate": False}
 
-    result    = await db.issues.insert_one(issue_doc)
-    issue_doc["_id"] = result.inserted_id
-
-    # ── 6. Duplicate-detection pipeline ──────────────────────────────────────
-    cluster_id   = None
-    match_status = None
-    dup_score    = None
-
-    if CLUSTERING_AVAILABLE:
-        routing      = await process_new_complaint(db, issue_doc, ml)
-        cluster_id   = routing.get("cluster_id")
-        match_status = routing.get("match_status")
-        dup_score    = routing.get("score")
-
-    # ── 7. Response ──────────────────────────────────────────────────────────
     return {
-        "message":         "Issue reported successfully",
-        "issue_id":        str(result.inserted_id),
-        "leader_id":       _str_id(leader_id),
-        "category":        resolved_category,
-        "priority_score":  priority_score,
-        # Clustering metadata — used by Flutter to show "merged / new" banner
-        "cluster_id":      cluster_id,
-        "match_status":    match_status,   # "auto_merged" | "pending_review" | "new_cluster" | null
-        "duplicate_score": round(dup_score, 3) if dup_score else None,
+        "is_duplicate": True,
+        "existing_issue": {
+            "id":          str(existing["_id"]),
+            "description": existing.get("description", "")[:120],
+            "status":      existing.get("status", "OPEN"),
+            "created_at":  existing["created_at"].isoformat()
+                           if existing.get("created_at") else None,
+            "category":    existing.get("category", ""),
+        },
     }
 
 
-# ─── GET /issues/similar  ─────────────────────────────────────────────────────
+# ─── GET /issues/escalated/list ───────────────────────────────────────────────
 
-@router.get("/similar")
-async def find_similar_issues(
-    description: str,
-    longitude:   float,
-    latitude:    float,
-    category:    str   = "General",
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Pre-check BEFORE creating a complaint.
-    Returns up to 3 similar active clusters with similarity scores.
-
-    Flutter calls this as the user finishes typing their description
-    and shows a "Similar issue already reported nearby" card if results exist.
-    """
-    if not CLUSTERING_AVAILABLE:
-        return {"similar_clusters": [], "count": 0}
-
-    db      = get_database()
-    similar = await check_similar_issues(db, description, longitude, latitude, category)
-    return {"similar_clusters": similar, "count": len(similar)}
+@router.get("/escalated/list")
+async def get_escalated_issues(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ("higher_authority", "admin"):
+        raise HTTPException(403, "Access denied")
+    db     = get_database()
+    issues = await db.issues.find({"status": "ESCALATED"}).sort("created_at", -1).to_list(200)
+    return [await _enrich(issue, db) for issue in issues]
 
 
-# ─── GET /issues ──────────────────────────────────────────────────────────────
+# ─── GET /issues/review/queue ─────────────────────────────────────────────────
+
+@router.get("/review/queue")
+async def get_review_queue_route(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ("higher_authority", "admin"):
+        raise HTTPException(403, "Access denied")
+    # Simple dedup has no review queue — return empty
+    return {"items": [], "count": 0}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COLLECTION-LEVEL ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("", response_model=List[dict])
 async def get_issues(
@@ -313,7 +249,64 @@ async def get_issues(
     return [await _enrich(issue, db) for issue in issues]
 
 
-# ─── GET /issues/{id} ────────────────────────────────────────────────────────
+@router.post("", status_code=201)
+async def create_issue(
+    description:  str                  = Form(...),
+    location:     str                  = Form(...),
+    category:     Optional[str]        = Form(None),
+    image:        Optional[UploadFile] = File(None),
+    audio:        Optional[UploadFile] = File(None),
+    current_user: dict                 = Depends(get_current_user),
+):
+    db = get_database()
+
+    loc               = _parse_location(location)
+    image_result      = await upload_image_file(image, folder="lokai/issues")
+    audio_result      = await upload_audio_file(audio, folder="lokai/audio")
+    ml                = _run_ml(description)
+    resolved_category = category or ml.get("category", "General")
+    priority_score    = float(ml.get("priority_score", 0.5))
+
+    leader_id = await assign_best_leader(
+        db,
+        location={"city": loc.get("city"), "town": loc.get("town")},
+        category=resolved_category,
+    )
+
+    now = datetime.utcnow()
+    issue_doc = {
+        "description":         description,
+        "category":            resolved_category,
+        "priority_score":      priority_score,
+        "location":            loc,
+        "user_id":             current_user["_id"],
+        "leader_id":           leader_id,
+        "resolution_attempts": 0,
+        "status":              "OPEN",
+        "source_type":         "citizen",
+        "image_url":           image_result["url"]       if image_result else None,
+        "image_public_id":     image_result["public_id"] if image_result else None,
+        "audio_url":           audio_result["url"]       if audio_result else None,
+        "audio_public_id":     audio_result["public_id"] if audio_result else None,
+        "resolution_notes":    [],
+        "created_at":          now,
+        "updated_at":          now,
+    }
+
+    result = await db.issues.insert_one(issue_doc)
+
+    return {
+        "message":        "Issue reported successfully",
+        "issue_id":       str(result.inserted_id),
+        "leader_id":      _str_id(leader_id),
+        "category":       resolved_category,
+        "priority_score": priority_score,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ITEM-LEVEL ROUTES — /{issue_id} MUST come after all static routes
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/{issue_id}")
 async def get_issue(
@@ -330,7 +323,25 @@ async def get_issue(
     return await _enrich(issue, db)
 
 
-# ─── DELETE /issues/{id} ─────────────────────────────────────────────────────
+# ─── GET /issues/{issue_id}/similar ──────────────────────────────────────────
+# Leader taps "Show Similar Issues" button on detail screen.
+
+@router.get("/{issue_id}/similar")
+async def get_similar_issues_for_leader(
+    issue_id:     str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Returns other open issues in the same category + location with similar text.
+    Used by the leader to see related complaints and resolve them together.
+    """
+    if not DEDUP_AVAILABLE:
+        return {"similar_issues": [], "count": 0}
+
+    db      = get_database()
+    results = await find_similar_issues_for_leader(db, issue_id)
+    return {"similar_issues": results, "count": len(results)}
+
 
 @router.delete("/{issue_id}", status_code=204)
 async def delete_issue(
@@ -353,8 +364,6 @@ async def delete_issue(
     await delete_issue_files(image_pids, issue.get("audio_public_id"))
     await db.issues.delete_one({"_id": ObjectId(issue_id)})
 
-
-# ─── POST /issues/{id}/resolve ────────────────────────────────────────────────
 
 @router.post("/{issue_id}/resolve")
 async def resolve_issue(
@@ -380,7 +389,7 @@ async def resolve_issue(
     new_attempts = issue.get("resolution_attempts", 0) + 1
     new_status   = "RESOLVED_L1" if new_attempts == 1 else "RESOLVED_L2"
 
-    notes = issue.get("resolution_notes", [])
+    notes = list(issue.get("resolution_notes", []))
     notes.append({
         "attempt":     new_attempts,
         "notes":       data.resolution_notes,
@@ -404,8 +413,6 @@ async def resolve_issue(
         "resolution_attempts": new_attempts,
     }
 
-
-# ─── POST /issues/{id}/verify ─────────────────────────────────────────────────
 
 @router.post("/{issue_id}/verify")
 async def verify_resolution(
@@ -440,7 +447,6 @@ async def verify_resolution(
         )
         return {"message": "Issue closed successfully", "status": "CLOSED"}
 
-    # Rejected
     if current_status == "RESOLVED_L1":
         await db.issues.update_one(
             {"_id": ObjectId(issue_id)},
@@ -472,8 +478,6 @@ async def verify_resolution(
     }
 
 
-# ─── POST /issues/{id}/override ──────────────────────────────────────────────
-
 @router.post("/{issue_id}/override")
 async def override_issue(
     issue_id:      str,
@@ -496,10 +500,10 @@ async def override_issue(
         await db.issues.update_one(
             {"_id": ObjectId(issue_id)},
             {"$set": {
-                "status":             "CLOSED",
+                "status":              "CLOSED",
                 "closed_by_authority": True,
-                "closed_at":          datetime.utcnow(),
-                "updated_at":         datetime.utcnow(),
+                "closed_at":           datetime.utcnow(),
+                "updated_at":          datetime.utcnow(),
             }},
         )
         return {"message": "Issue closed by Higher Authority", "status": "CLOSED"}
@@ -529,91 +533,3 @@ async def override_issue(
         return {"message": f"Issue reassigned to {new_leader['name']}", "status": "OPEN"}
 
     raise HTTPException(400, "Invalid action. Use 'close' or 'reassign'")
-
-
-# ─── POST /issues/{id}/support  ──────────────────────────────────────────────
-
-@router.post("/{issue_id}/support")
-async def support_issue(
-    issue_id:     str,
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Citizen supports an existing issue's cluster without creating a duplicate.
-    Called from the Flutter "Similar issue exists" card → "Support" button.
-    Increments the cluster's complaint_count and unique_reporter_count,
-    then recalculates priority.
-    """
-    if not CLUSTERING_AVAILABLE:
-        raise HTTPException(503, "Clustering pipeline not available")
-
-    db = get_database()
-    try:
-        issue = await db.issues.find_one({"_id": ObjectId(issue_id)})
-    except Exception:
-        raise HTTPException(400, "Invalid issue ID")
-    if not issue:
-        raise HTTPException(404, "Issue not found")
-
-    cluster_id = issue.get("issue_cluster_id")
-    if not cluster_id:
-        raise HTTPException(400, "This issue has no cluster yet")
-
-    result = await support_existing_cluster(db, str(cluster_id), current_user["_id"])
-    if "error" in result:
-        raise HTTPException(400, result["error"])
-    return result
-
-
-# ─── GET /issues/escalated/list ───────────────────────────────────────────────
-
-@router.get("/escalated/list")
-async def get_escalated_issues(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ("higher_authority", "admin"):
-        raise HTTPException(403, "Access denied")
-
-    db     = get_database()
-    issues = await db.issues.find({"status": "ESCALATED"}).sort("created_at", -1).to_list(200)
-    return [await _enrich(issue, db) for issue in issues]
-
-
-# ─── GET /issues/review/queue  ───────────────────────────────────────────────
-
-@router.get("/review/queue")
-async def get_review_queue_route(current_user: dict = Depends(get_current_user)):
-    """
-    Higher authority: list uncertain duplicate matches needing manual decision.
-    """
-    if current_user["role"] not in ("higher_authority", "admin"):
-        raise HTTPException(403, "Access denied")
-    if not CLUSTERING_AVAILABLE:
-        return {"items": [], "count": 0}
-
-    db    = get_database()
-    items = await get_review_queue(db, status="PENDING")
-    return {"items": items, "count": len(items)}
-
-
-# ─── POST /issues/review/{review_id}/decide  ─────────────────────────────────
-
-@router.post("/review/{review_id}/decide")
-async def decide_review_route(
-    review_id:    str,
-    decision:     str,   # "merge" | "reject"
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Higher authority merges (confirms duplicate) or rejects (keeps as new cluster).
-    """
-    if current_user["role"] not in ("higher_authority", "admin"):
-        raise HTTPException(403, "Access denied")
-    if decision not in ("merge", "reject"):
-        raise HTTPException(400, 'decision must be "merge" or "reject"')
-    if not CLUSTERING_AVAILABLE:
-        raise HTTPException(503, "Clustering pipeline not available")
-
-    db     = get_database()
-    result = await resolve_review(db, review_id, decision, current_user["_id"])
-    if "error" in result:
-        raise HTTPException(400, result["error"])
-    return result

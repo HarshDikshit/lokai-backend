@@ -9,7 +9,7 @@ router = APIRouter(prefix="/social-media", tags=["Social Media Analysis"])
 # CONFIG
 # -------------------------
 
-newsapi = NewsApiClient(api_key="0738ed98bd3e465aa322574163ab769b")
+newsapi = NewsApiClient(api_key="b9810b2643334398acef16112382779e")
 
 sentiment_model = pipeline(
     "sentiment-analysis",

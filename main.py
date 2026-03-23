@@ -105,7 +105,7 @@ app.include_router(analyze_complaint.router, prefix="/api/v1")
 app.include_router(social_media_analysis.router, prefix="/api/v1")
 app.include_router(feed.router, prefix="/api/v1")
 # app.include_router(public_update.router, prefix="/api/v1")
-app.include_router(chatbot.router, prefix='/api/v1/chatbot', tags=['chatbot'])
+app.include_router(chatbot.router, prefix='/api/v1')
 
 
 @app.get("/")

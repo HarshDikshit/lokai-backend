@@ -4,8 +4,13 @@ import requests
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.database.connection import get_database
+from bson.objectid import ObjectId
+from pymongo import MongoClient
 
-router = APIRouter()
+
+
+
+router = APIRouter(prefix='/chatbot', tags=['chatbot'])
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_nisznd9t_ipWfE1Y8D5HvaHAAMFgqkspk")
 
@@ -14,68 +19,208 @@ class ChatRequest(BaseModel):
 
 SYSTEM_PROMPT = """
 You are LokAI Assistant.
+
 STRICT RULES:
 - Answer in maximum 2–3 lines ONLY
-- Be direct and practical
-- Do NOT include explanations, reasoning, or thinking
-- Do NOT assume anything not given
-- Do NOT mention downloading app or external steps
-APP FLOW (IMPORTANT):
-- Submit issue → 'Submit Issue' section
-- Track issue → 'My Issues' section
-- Users already logged into app
+- Be direct, practical, and helpful
+- No explanations, no reasoning
+- No step numbering, no bullets
+- No quotes, no \\n, no symbols
+
+APP CONTEXT:
+- User is already inside the app
+- Submit issue → "Submit Issue"
+- Track issue → "My Issues"
+
 YOUR JOB:
-- Guide users inside the app
-- Give short, realistic steps
+1. Answer general app queries clearly
+2. Help user navigate inside app
+3. Give small practical civic advice when relevant
+
+ADVICE RULES:
+- Give only simple, safe, real-world suggestions
+- Do NOT give technical or risky instructions
+- Keep advice short (1 line max)
+
+EXAMPLES:
+
+User: how to report issue
+Answer: Go to Submit Issue, fill details and submit your complaint.
+
+User: garbage problem in my area
+Answer: Report it from Submit Issue with a clear photo and exact location for faster action.
+
+User: how to check status
+Answer: Open My Issues section to track your complaint updates.
+
+User: water leakage problem
+Answer: Report it with proper location and description so authorities can act quickly.
+
 STYLE:
-- Simple, Clear, Helpful
+- Simple
+- Clear
+- Human-like
+- No extra text
+
 """
+
+
+def format_issue_status(issue):
+    status = issue.get("status", "").upper()
+
+    if status == "OPEN":
+        return "Your issue is registered and awaiting action."
+
+    elif status == "IN_PROGRESS":
+        return "Your issue is currently being worked on."
+
+    elif status == "RESOLVED_L1":
+        return "Your issue has been resolved by the authority in his first attempt. Awaiting for your feedback."
+
+    elif status == "RESOLVED_L2":
+        return "Your issue has been resolved by the authority for his second attempt. Awaiting for your feedback."
+
+    elif status == "ESCALATED":
+        return "Your issue has been escalated to higher authority. He will assign another best leader after review to resolve your issue."
+
+    elif status == "CLOSED":
+        return "Your issue has been successfully closed."
+
+    else:
+        return "Your issue status is currently unavailable."
+
+
 
 def detect_language(text):
     url = "https://api.sarvam.ai/v1/language-detection"
-    headers = {"Authorization": f"Bearer {SARVAM_API_KEY}", "Content-Type": "application/json"}
-    try:
-        res = requests.post(url, json={"input": text}, headers=headers)
-        return res.json().get("language_code", "en-IN")
-    except:
-        return "en-IN"
+
+    headers = {
+        "Authorization": f"Bearer {SARVAM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "input": text
+    }
+
+    res = requests.post(url, json=payload, headers=headers)
+    data = res.json()
+    print("RAW LANGUAGE DETECTION RESPONSE:", data)
+    return data.get("language_code", "en")
+
+
 
 def translate_text(text, source_lang, target_lang):
-    if source_lang == target_lang: return text
-    url = "https://api.sarvam.ai/v1/translate"
-    headers = {"Authorization": f"Bearer {SARVAM_API_KEY}", "Content-Type": "application/json"}
-    payload = {"input": text, "source_language_code": source_lang, "target_language_code": target_lang}
-    try:
-        res = requests.post(url, json=payload, headers=headers)
-        return res.json().get("translated_text", text)
-    except:
+    if source_lang == target_lang:
         return text
+
+    url = "https://api.sarvam.ai/v1/translate"
+
+    headers = {
+        "Authorization": f"Bearer {SARVAM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "input": text,
+        "source_language_code": source_lang,
+        "target_language_code": target_lang
+    }
+
+    res = requests.post(url, json=payload, headers=headers)
+    data = res.json()
+    print("TRANSLATION API RESPONSE:", data)
+    return data.get("translated_text", text)
+
+
 
 def detect_intent(text):
     url = "https://api.sarvam.ai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {SARVAM_API_KEY}", "Content-Type": "application/json"}
+
+    headers = {
+        "Authorization": f"Bearer {SARVAM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
         "model": "sarvam-m",
         "messages": [
-            {"role": "system", "content": "Classify intent into: general_query or issue_status. Only return one word."},
-            {"role": "user", "content": text}
+            {
+                "role": "system",
+                "content": """You are an intent classifier. Classify the user message into ONLY one of these two intents:
+
+issue_status → ONLY when the user is explicitly asking about the status/update of an already submitted complaint AND provides a complaint ID (a long code like 69ba2ed5ed8e612d6434aa64).
+
+general_query → Everything else. This includes:
+- Reporting a new problem (pothole, garbage, fire, water, etc.)
+- Asking how to use the app
+- Asking for advice or help
+- Any civic complaint or emergency without an ID
+
+RULE: If there is NO complaint ID in the message, ALWAYS return general_query.
+
+Return ONLY one word: general_query or issue_status. No explanation."""
+            },
+            {
+                "role": "user",
+                "content": text
+            }
         ]
     }
-    try:
-        res = requests.post(url, json=payload, headers=headers)
-        return res.json()["choices"][0]["message"]["content"].strip().lower()
-    except:
-        return "general_query"
+
+    res = requests.post(url, json=payload, headers=headers)
+    data = res.json()
+
+    raw = data["choices"][0]["message"]["content"]
+
+    return clean_intent(raw)
+
+
+
+def clean_intent(text):
+    # Remove <think>
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    # Remove spaces/newlines
+    text = text.strip().lower()
+
+    return text
+
 
 def clean_response(text):
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    text = text.replace('"', '').replace('\n', ' ')
-    text = re.sub(r"\b\d+\.\s*", "", text)
-    return re.sub(r"\s+", " ", text).strip()
+    try:
+        text = ast.literal_eval(text)
+    except:
+        pass
 
-def generate_ai_response(text):
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    text = text.replace('\"', '')
+
+    text = text.replace('\n', ' ')
+
+    text = re.sub(r"\b\d+\.\s*", "", text)
+
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+# ✅ LIMIT TO 3 LINES (extra safety)
+def limit_lines(text, max_lines=3):
+    lines = text.split("\n")
+    return "\n".join(lines[:max_lines])
+
+
+
+def generate_response(text):
     url = "https://api.sarvam.ai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {SARVAM_API_KEY}", "Content-Type": "application/json"}
+
+    headers = {
+        "Authorization": f"Bearer {SARVAM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
         "model": "sarvam-m",
         "messages": [
@@ -83,26 +228,68 @@ def generate_ai_response(text):
             {"role": "user", "content": text}
         ]
     }
-    try:
-        res = requests.post(url, json=payload, headers=headers)
-        raw_output = res.json()["choices"][0]["message"]["content"]
-        return clean_response(raw_output)
-    except:
-        return "I am having trouble processing that right now."
+
+    res = requests.post(url, json=payload, headers=headers)
+    data = res.json()
+
+    raw_output = data["choices"][0]["message"]["content"]
+
+    # ✅ CLEAN + LIMIT OUTPUT
+    cleaned = clean_response(raw_output)
+    final = limit_lines(cleaned)
+
+    return final
+
+def extract_object_id(text):
+    # Normalize text
+    text = text.lower()
+
+    # Find all 24-length hex strings
+    matches = re.findall(r"[a-f0-9]{24}", text)
+
+    if matches:
+        return matches[0]
+
+    return None
 
 @router.post("/chat")
-async def chat_endpoint(request: ChatRequest):
-    db = get_database()
-    orig_lang = detect_language(request.message)
-    eng_text = translate_text(request.message, orig_lang, "en-IN")
-    intent = detect_intent(eng_text)
-    if "issue" in intent:
-        latest_issue = await db.issues.find_one(sort=[("created_at", -1)])
-        if latest_issue:
-            response_text = f"Your latest issue regarding {latest_issue.get('category')} is currently {latest_issue.get('status', 'Pending')}."
+async def chat(req: ChatRequest):
+    user_msg = req.message
+    client = MongoClient(os.getenv("MONGODB_URL"))
+    db = client["lokai_db"]
+
+    lang = detect_language(user_msg)
+    english_msg = translate_text(user_msg, lang, "en")
+
+    intent = detect_intent(english_msg)
+
+    if "issue_status" in intent.lower():
+
+        match = re.findall(r"[a-fA-F0-9]{24}", user_msg)
+        issue_id = match[0] if match else None
+
+        if not issue_id:
+            response_text = "Please provide a valid issue ID."
         else:
-            response_text = "No issues found for your account."
+            try:
+                # ✅ No await - sync call
+                issue = db.issues.find_one({"_id": ObjectId(issue_id)})
+
+                if issue:
+                    response_text = format_issue_status(issue)
+                else:
+                    response_text = "Issue not found in database."
+
+            except Exception as e:
+                import traceback
+                print("FULL TRACEBACK:\n", traceback.format_exc())
+                response_text = f"Error: {str(e)}"
     else:
-        response_text = generate_ai_response(eng_text)
-    final_response = translate_text(response_text, "en-IN", orig_lang)
-    return {"response": final_response, "original_language": orig_lang}
+        response_text = generate_response(english_msg)
+    
+
+    final_response = translate_text(response_text, "en", lang)
+    return {
+        "intent": intent,
+        "response": final_response
+    }

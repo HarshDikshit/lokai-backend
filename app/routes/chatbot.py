@@ -4,6 +4,10 @@ import requests
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.database.connection import get_database
+from bson.objectid import ObjectId
+from pymongo import MongoClient
+
+
 
 
 router = APIRouter(prefix='/chatbot', tags=['chatbot'])
@@ -71,7 +75,13 @@ def format_issue_status(issue):
         return "Your issue is currently being worked on."
 
     elif status == "RESOLVED_L1":
-        return "Your issue has been resolved by the authority."
+        return "Your issue has been resolved by the authority in his first attempt. Awaiting for your feedback."
+
+    elif status == "RESOLVED_L2":
+        return "Your issue has been resolved by the authority for his second attempt. Awaiting for your feedback."
+
+    elif status == "ESCALATED":
+        return "Your issue has been escalated to higher authority. He will assign another best leader after review to resolve your issue."
 
     elif status == "CLOSED":
         return "Your issue has been successfully closed."
@@ -245,7 +255,8 @@ def extract_object_id(text):
 @router.post("/chat")
 async def chat(req: ChatRequest):
     user_msg = req.message
-    db = get_database()
+    client = MongoClient(os.getenv("MONGODB_URL"))
+    db = client["lokai_db"]
 
     lang = detect_language(user_msg)
     english_msg = translate_text(user_msg, lang, "en")

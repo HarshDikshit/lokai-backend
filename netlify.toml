@@ -1,0 +1,11 @@
+[build]
+  command = "pip install -r requirements.txt"
+  publish = "."
+
+[functions]
+  included_files = ["app/**", "models_analyze_complaint/**", "utils/**", ".env"]
+
+[[redirects]]
+  from = "/*"
+  to = "/.netlify/functions/main"
+  status = 200

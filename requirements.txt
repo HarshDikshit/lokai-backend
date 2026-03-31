@@ -12,9 +12,6 @@ aiofiles==23.2.1
 python-dotenv==1.0.1
 slowapi==0.1.9
 Pillow==10.3.0
-torch
-transformers
-accelerate
 pydub
 SpeechRecognition
 ffmpeg-python

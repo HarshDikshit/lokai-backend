@@ -1,9 +1,4 @@
-import os
-import requests
-
-HF_TOKEN = os.getenv("HF_TOKEN")
-# Standard Zero-Shot Classification model
-API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+from transformers import pipeline
 
 labels = [
     "Infrastructure & Roads",
@@ -18,22 +13,17 @@ labels = [
     "Government Services"
 ]
 
-def classify_text(text):
-    if not HF_TOKEN:
-        return "Error: No Token"
+classifier = pipeline(
+    "zero-shot-classification",
+    model="facebook/bart-large-mnli",
+    device=-1
+)
 
-    headers = {{"Authorization": f"Bearer {HF_TOKEN}"}}
-    payload = {{
-        "inputs": text,
-        "parameters": {{"candidate_labels": labels}}
-    }}
+def classify_text(user_text):
 
-    try:
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=20)
-        result = response.json()
-        # Return the top label
-        if 'labels' in result and len(result['labels']) > 0:
-            return result['labels'][0]
-    except:
-        pass
-    return "Uncategorized"
+    result = classifier(user_text, labels)
+
+    return {
+        "predicted_category": result["labels"][0],
+        "confidence": round(result["scores"][0], 3)
+    }
